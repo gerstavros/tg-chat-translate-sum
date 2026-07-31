@@ -8,7 +8,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_DIR = os.path.join(PROJECT_ROOT, "package")
 VENV_DIR = os.path.join(PACKAGE_DIR, ".venv")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "dist")
-SPEC_FILE = os.path.join(PROJECT_ROOT, "tg-translate.spec")
+SPEC_FILE = os.path.join(PROJECT_ROOT, "tg-translate-sum.spec")
 
 # Ensure running from the right directory
 os.chdir(PROJECT_ROOT)
@@ -28,7 +28,7 @@ def build():
 
     cmd = [
         sys.executable or "python3", "-m", "PyInstaller",
-        "--name", "tg-translate",
+        "--name", "tg-translate-sum",
         "--onefile",
         "--windowed",
         "--noconfirm",
@@ -67,7 +67,7 @@ def build():
     ]
 
     print("=" * 60)
-    print("Building tg-translate executable with PyInstaller")
+    print("Building tg-translate-sum executable with PyInstaller")
     print("=" * 60)
     print(f"Entry point: {entry}")
     print(f"Output dir: {OUTPUT_DIR}")
@@ -76,7 +76,7 @@ def build():
 
     result = subprocess.run(cmd)
     if result.returncode == 0:
-        dest = os.path.join(OUTPUT_DIR, "tg-translate")
+        dest = os.path.join(OUTPUT_DIR, "tg-translate-sum")
         print(f"\n Build successful!")
         print(f"   Executable: {dest}")
         print(f"   Size: {os.path.getsize(dest) / 1024 / 1024:.1f} MB")
