@@ -1,0 +1,43 @@
+# Εξαρτήσεις — tg-chat-translate-sum
+
+## Υποχρεωτικά
+
+tkinter
+VLC
+Python ≥ 3.11
+unread tool https://maxbolgarin.github.io/unread/#quickstart
+
+## προαιρετικά
+
+cairo
+librsvg
+
+## Python dependencies (ενσωματωμένες στο PyInstaller binary)
+
+telethon
+openai
+python-dotenv
+customtkinter
+Pillow
+python-vlc
+cairosvg
+
+## Package δημιουργία
+
+### Debian / Ubuntu control
+yaml
+Depends: python3 (>= 3.11), python3-tk, vlc
+Recommends: libcairo2, librsvg2-bin
+
+
+### Arch Linux `PKGBUILD`
+```bash
+depends=('python' 'tk' 'vlc')
+optdepends=('cairo: SVG icons' 'librsvg: SVG fallback')
+```
+
+### Fedora / openSUSE `RPM spec`
+```bash
+Requires: python3 >= 3.11, python3-tkinter, vlc
+Recommends: cairo, librsvg2
+```

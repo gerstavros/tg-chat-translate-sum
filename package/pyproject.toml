@@ -1,0 +1,33 @@
+[project]
+name = "tg-chat-translate-sum"
+version = "0.2.4"
+description = "Translator and Summarizer for Telegram Chats, Channels and Groups, using openai api."
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.11"
+
+dependencies = [
+    "telethon>=1.34",
+    "openai>=1.0",
+    "python-dotenv>=1.0",
+    "customtkinter>=5.2",
+    "Pillow>=10.0",
+    "python-vlc>=3.0",
+    "qrcode>=7.0",
+]
+
+[project.scripts]
+chat-translate-sum = "tg_translate.gui:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tg_translate"]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.21.0",
+    "questionary>=2.0",
+]
