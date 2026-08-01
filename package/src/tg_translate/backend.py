@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -18,10 +19,27 @@ from typing import Callable
 from dotenv import load_dotenv
 
 # --- Load .env ---
-load_dotenv()
-env_path = Path.home() / ".unread" / ".env"
-if env_path.exists():
-    load_dotenv(env_path)
+# Settings save to APP_ENV_PATH; older versions wrote next to the package
+# (package/.env). Migrate that file once so first-run credentials survive
+# restarts, then load with priority: app config dir > CWD (dev) > unread's.
+APP_CONFIG_DIR = Path.home() / ".chat-translate-sum"
+APP_ENV_PATH = APP_CONFIG_DIR / ".env"
+_LEGACY_PACKAGE_ENV = Path(__file__).resolve().parent.parent.parent / ".env"
+
+
+def _load_env() -> None:
+    try:
+        if not APP_ENV_PATH.exists() and _LEGACY_PACKAGE_ENV.exists():
+            APP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(_LEGACY_PACKAGE_ENV, APP_ENV_PATH)
+    except Exception:
+        pass
+    for p in (APP_ENV_PATH, Path.cwd() / ".env", Path.home() / ".unread" / ".env"):
+        if p.exists():
+            load_dotenv(p)
+
+
+_load_env()
 
 UNREAD_SESSION = Path.home() / ".unread" / "storage" / "session.sqlite.session"
 WINDOW_STATE_PATH = Path.home() / ".chat-translate-sum" / "window_state.json"
@@ -128,6 +146,10 @@ class MessageInfo:
 # --- Telegram client ---
 
 
+class NotAuthorizedError(RuntimeError):
+    """Raised when an authorized Telegram session is required but missing."""
+
+
 def _make_client_unconnected():
     """Build (but not connect) a Telethon client, reusing unread's session if available."""
     from telethon import TelegramClient
@@ -136,11 +158,9 @@ def _make_client_unconnected():
     api_hash = os.environ.get("TG_API_HASH")
 
     if not api_id or not api_hash:
-        raise RuntimeError(
-            "Missing TG_API_ID and TG_API_HASH.\n"
-            "Create a .env file (see .env.example).\n"
-            "Get credentials at https://my.telegram.org -> API Development"
-        )
+        from .i18n import _
+
+        raise RuntimeError(_("error.env_missing"))
 
     session_path = str(UNREAD_SESSION)
     if not Path(session_path).exists():
@@ -159,7 +179,9 @@ async def create_telegram_client():
     await client.connect()
     if not await client.is_user_authorized():
         await client.disconnect()
-        raise RuntimeError("Telegram client is not authorized. Run the login flow first.")
+        from .i18n import _
+
+        raise NotAuthorizedError(_("error.not_authorized"))
     return client
 
 

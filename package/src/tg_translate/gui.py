@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import webbrowser
+from pathlib import Path
 from tkinter import Frame as TkFrame, Menu as TkMenu, Text
 
 import customtkinter as ctk
@@ -34,10 +35,12 @@ if _orig_body:
 
 #
 from .backend import (
+    APP_ENV_PATH,
     ChatInfo,
     MAX_PER_CHAT,
     MODEL,
     MessageInfo,
+    NotAuthorizedError,
     check_env,
     download_video_sync,
     is_authorized_sync,
@@ -317,8 +320,12 @@ class App(ctk.CTk):
         lang = ""
         try:
             from dotenv import dotenv_values
-            env_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
-            env_vals = dotenv_values(env_path)
+            env_vals = {}
+            for p in (Path.cwd() / ".env", APP_ENV_PATH):
+                try:
+                    env_vals.update(dotenv_values(p))
+                except Exception:
+                    pass
             lang = env_vals.get("LANGUAGE", "")
             if lang and lang != get_language():
                 set_language(lang)
@@ -683,7 +690,7 @@ class App(ctk.CTk):
             try:
                 raw_msgs, photo_map = loop.run_until_complete(_fetch_only())
             except Exception as err:
-                self.after(0, lambda err=err: self._on_translate_error(str(err)))
+                self.after(0, lambda err=err: self._on_translate_error(err))
                 return
             if not raw_msgs:
                 self.after(0, lambda: self.footer_label.configure(text=_("translate.no_new")))
@@ -1078,19 +1085,70 @@ class App(ctk.CTk):
                 chats = list_chats_sync(only_unread=False)
                 self.after(0, self._on_chats_loaded, chats, None)
             except Exception as e:
-                self.after(0, self._on_chats_loaded, None, str(e))
+                self.after(0, self._on_chats_loaded, None, e)
 
         threading.Thread(target=_work, daemon=True).start()
 
     def _on_chats_loaded(self, chats, error):
         if error:
-            _ctk_dialog(_("error.dialog_title"), error, parent=self)
-            self.footer_label.configure(text=error, image=get("error", size=14), compound="left")
+            if self._handle_startup_error(error):
+                return
+            _ctk_dialog(_("error.dialog_title"), str(error), parent=self)
+            self.footer_label.configure(text=str(error), image=get("error", size=14), compound="left")
             return
         self.chats = chats or []
         self._all_chats = self.chats
         self._selected_chat_id = None
         self._populate_chat_tree()
+
+    def _handle_startup_error(self, error) -> bool:
+        """Open settings/login when the failure is a setup problem.
+
+        Returns True when a recovery flow was started (it reloads the chats
+        itself on success); False when the error should be shown as-is.
+        """
+        if isinstance(error, NotAuthorizedError):
+            self._start_login_flow()
+            return True
+        ok, _msg = check_env()
+        if not ok:
+            if not getattr(self, "_recovery_open", False):
+                self._prompt_settings_then_reload()
+            return True
+        return False
+
+    def _start_login_flow(self) -> None:
+        """Open the QR/SMS login window; reload chats when login succeeds."""
+        from .login_window import run_login_flow
+
+        self.status_label.configure(text=_("login.title"))
+        if run_login_flow(parent=self):
+            self.load_chats()
+        else:
+            self.footer_label.configure(
+                text=_("error.not_authorized"), image=get("error", size=14), compound="left")
+
+    def _prompt_settings_then_reload(self) -> None:
+        """First-run flow: ask for API keys, then log in, then load chats."""
+        if getattr(self, "_recovery_open", False):
+            return
+        self._recovery_open = True
+        try:
+            dialog = SettingsDialog(self)
+            dialog.grab_set()
+            self.wait_window(dialog)
+            ok, _msg = check_env()
+            if not ok:
+                _ctk_dialog(_("error.dialog_title"), _("error.env_missing"), parent=self)
+                self.footer_label.configure(
+                    text=_("error.env_missing"), image=get("error", size=14), compound="left")
+                return
+            if not is_authorized_sync():
+                self._start_login_flow()
+                return
+            self.load_chats()
+        finally:
+            self._recovery_open = False
 
     def _get_selected_chat(self) -> ChatInfo | None:
         if self._selected_chat_id is None:
@@ -1109,8 +1167,11 @@ class App(ctk.CTk):
             return
         self._show_translate_dialog(chat)
 
-    def _on_translate_error(self, error: str) -> None:
-        self.footer_label.configure(text=error, image=get("error", size=14), compound="left")
+    def _on_translate_error(self, error) -> None:
+        if isinstance(error, NotAuthorizedError):
+            self._start_login_flow()
+            return
+        self.footer_label.configure(text=str(error), image=get("error", size=14), compound="left")
 
     def _set_retranslate_state(self, state: str) -> None:
         for child in self.tab_translate.winfo_children():
@@ -1460,7 +1521,7 @@ class SettingsDialog(ctk.CTkToplevel):
         ).grid(row=0, column=1, padx=10)
 
     def save(self) -> None:
-        env_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+        env_path = APP_ENV_PATH
         lines = [
             f"TG_API_ID={self.api_id_entry.get()}",
             f"TG_API_HASH={self.api_hash_entry.get()}",
@@ -1469,6 +1530,7 @@ class SettingsDialog(ctk.CTkToplevel):
             f"LANGUAGE={self._lang_map.get(self.lang_combo.get(), self.lang_combo.get())}",
         ]
         try:
+            env_path.parent.mkdir(parents=True, exist_ok=True)
             with open(env_path, "w") as f:
                 f.write("\n".join(lines) + "\n")
             os.environ["TG_API_ID"] = self.api_id_entry.get()

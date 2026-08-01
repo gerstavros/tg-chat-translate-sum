@@ -37,13 +37,19 @@ def _login_dialog(title: str, message: str, parent=None) -> None:
         parent.wait_window(dlg)
 
 
-class LoginWindow(ctk.CTk):
-    """First-run Telegram login window: QR code or SMS login."""
+class LoginWindow(ctk.CTkToplevel):
+    """Telegram login window: QR code or SMS login.
+
+    Opens either as a standalone window (hidden root + own mainloop, used
+    before the main App exists) or as a modal child of an existing window
+    (used when the App is already running).
+    """
 
     QR_SIZE = 260
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, master=None, standalone_root=None) -> None:
+        super().__init__(master)
+        self._standalone_root = standalone_root
         ctk.set_widget_scaling(1.1)
 
         self.title(_("login.title"))
@@ -60,6 +66,15 @@ class LoginWindow(ctk.CTk):
                 self.iconphoto(True, PhotoImage(file=icon_path))
         except Exception:
             pass
+
+        # Modal child when embedded in the running App.
+        if standalone_root is None and master is not None:
+            try:
+                self.transient(master)
+                self.update_idletasks()
+                self.grab_set()
+            except Exception:
+                pass
 
         self.result = False
         self._closed = False
@@ -299,11 +314,27 @@ class LoginWindow(ctk.CTk):
 
     def destroy(self) -> None:
         self._closed = True
+        root = self._standalone_root
         super().destroy()
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
 
 
-def run_login_flow() -> bool:
-    """Show the login window (blocking) and return True if login succeeded."""
-    win = LoginWindow()
-    win.mainloop()
+def run_login_flow(parent=None) -> bool:
+    """Show the login window (blocking) and return True if login succeeded.
+
+    Without a parent it runs as a standalone window before the main App
+    exists; with a parent it opens as a modal child of the running App.
+    """
+    if parent is None:
+        root = ctk.CTk()
+        root.withdraw()
+        win = LoginWindow(root, standalone_root=root)
+        root.mainloop()
+        return getattr(win, "result", False)
+    win = LoginWindow(parent)
+    parent.wait_window(win)
     return getattr(win, "result", False)

@@ -93,6 +93,8 @@
   "chats.search": "Αναζήτηση...",
   "translate.header_title": "{chat} -- {status}",
   "error.dialog_title": "Σφάλμα",
+  "error.env_missing": "Λείπουν τα TG_API_ID και TG_API_HASH.\nΔημιούργησε ένα αρχείο .env (δες .env.example).\nΠάρε τα διαπιστευτήρια από: https://my.telegram.org → API Development",
+  "error.not_authorized": "Ο πελάτης Telegram δεν είναι εξουσιοδοτημένος. Συνδέσου με QR code ή SMS.",
   "settings.save_error_msg": "Αποτυχία αποθήκευσης:\n{error}",
   "main.env_hint": "⚠️  {msg}\n   Μπορείς να ρυθμίσεις τα API keys από το μενού Ρυθμίσεις.",
   "video.play": "Αναπαραγωγή",

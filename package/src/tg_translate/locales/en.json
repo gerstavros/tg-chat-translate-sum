@@ -93,6 +93,8 @@
   "chats.search": "Search...",
   "translate.header_title": "{chat} -- {status}",
   "error.dialog_title": "Error",
+  "error.env_missing": "Missing TG_API_ID and TG_API_HASH.\nCreate a .env file (see .env.example).\nGet credentials at https://my.telegram.org → API Development",
+  "error.not_authorized": "Telegram client is not authorized. Please sign in with QR code or SMS.",
   "settings.save_error_msg": "Failed to save:\n{error}",
   "main.env_hint": "⚠️  {msg}\n   You can set API keys from the Settings menu.",
   "video.play": "Play",

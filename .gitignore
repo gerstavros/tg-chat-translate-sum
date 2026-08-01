@@ -15,6 +15,7 @@ secrets/
 
 # Dependencies
 εξαρτήσεις
+οδηγίες-build.txt
 
 # Build
 dist/
