@@ -170,6 +170,42 @@ def _apply_formatting(widget, text: str) -> None:
     tw.insert("end", "\n")
 
 
+_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
+
+
+def _open_url_tag(event):
+    tw = event.widget
+    try:
+        idx = tw.index("current")
+        ranges = tw.tag_ranges("url_link")
+        for i in range(0, len(ranges), 2):
+            start, end = ranges[i], ranges[i + 1]
+            if tw.compare(start, "<=", idx) and tw.compare(idx, "<=", end):
+                webbrowser.open(tw.get(start, end))
+                break
+    except Exception:
+        pass
+
+
+def _insert_with_links(widget, text):
+    tw = getattr(widget, "_textbox", widget)
+    if "url_link" not in tw.tag_names():
+        tw.tag_config("url_link", foreground="#00aaff", underline=True)
+        tw.tag_bind("url_link", "<Button-1>", _open_url_tag)
+        tw.tag_bind("url_link", "<Enter>", lambda e: tw.configure(cursor="hand2"))
+        tw.tag_bind("url_link", "<Leave>", lambda e: tw.configure(cursor=""))
+    pos = 0
+    for m in _URL_RE.finditer(text):
+        if m.start() > pos:
+            tw.insert("end", text[pos:m.start()])
+        url = m.group(0)
+        while url and url[-1] in ".,;:!?)]}\"'" :
+            url = url[:-1]
+        tw.insert("end", url, "url_link")
+        pos = m.start() + len(url)
+    tw.insert("end", text[pos:])
+
+
 # ── Media helpers ───────────────────────────────────────────────────────
 
 
@@ -231,8 +267,32 @@ def _bind_arrows(app):
                 win.bind('<KP_Enter>', nav)
     except: pass
 
+
+_open_menu = None
+_menu_close_bound = False
+
+
+def _close_context_menu(event=None):
+    global _open_menu
+    m = _open_menu
+    _open_menu = None
+    if m is not None:
+        try:
+            if m.winfo_ismapped():
+                m.unpost()
+        except Exception:
+            pass
+
+
 def _add_context_menu(widget) -> None:
     """Add right-click context menu to a Text widget."""
+    global _menu_close_bound
+    if not _menu_close_bound:
+        _menu_close_bound = True
+        top = widget.winfo_toplevel()
+        top.bind("<Button-1>", _close_context_menu, add="+")
+        top.bind("<Button-2>", _close_context_menu, add="+")
+        top.bind("<Escape>", _close_context_menu, add="+")
     menu = TkMenu(widget, tearoff=False)
 
     def _copy():
@@ -252,11 +312,13 @@ def _add_context_menu(widget) -> None:
     menu.add_command(label=_("menu.copy_all"), command=_copy_all)
 
     def _show_menu(event):
+        global _open_menu
         try:
             widget.selection_get()
             menu.entryconfig(0, state="normal")
         except Exception:
             menu.entryconfig(0, state="disabled")
+        _open_menu = menu
         menu.post(event.x_root, event.y_root)
 
     widget.bind("<Button-3>", _show_menu)
@@ -885,10 +947,10 @@ class App(ctk.CTk):
                             clean.append(s)
                         summary_text = "\n".join(clean).strip() or output
                     display = summary_text if summary_text else _("summary.empty")
-                    self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(1), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), self.summary_text.insert("1.0", display), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.done")), self.summary_mark_read_btn.configure(state="normal")))
+                    self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(1), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), _insert_with_links(self.summary_text, display), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.done")), self.summary_mark_read_btn.configure(state="normal")))
                 else:
                     error = result.stderr or "Unknown error"
-                    self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(0), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), self.summary_text.insert("1.0", f"Error:\n{error}\n"), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.failed")), self.summary_mark_read_btn.configure(state="normal")))
+                    self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(0), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), _insert_with_links(self.summary_text, f"Error:\n{error}\n"), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.failed")), self.summary_mark_read_btn.configure(state="normal")))
             except FileNotFoundError:
                 self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(0), self.summary_progress.configure(mode="determinate"), _ctk_dialog(_("error.dialog_title"), _("error.unread_not_found"), parent=self)))
 
