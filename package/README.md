@@ -19,7 +19,6 @@ I made it in Python because of existing libraries (telethon, unread), and used T
 
 - Telegram API credentials (api_id + api_hash) from [my.telegram.org](https://my.telegram.org)
 - OpenAI API key
-- Unread [Read here how to install it](https://maxbolgarin.github.io/unread/#quickstart)
 
 ## Quick Start
 

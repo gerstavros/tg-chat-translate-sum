@@ -1,6 +1,6 @@
 [project]
 name = "tg-chat-translate-sum"
-version = "0.2.4"
+version = "0.2.5"
 description = "Translator and Summarizer for Telegram Chats, Channels and Groups, using openai api."
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }

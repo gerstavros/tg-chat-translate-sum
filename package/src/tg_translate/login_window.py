@@ -40,9 +40,7 @@ def _login_dialog(title: str, message: str, parent=None) -> None:
 class LoginWindow(ctk.CTkToplevel):
     """Telegram login window: QR code or SMS login.
 
-    Opens either as a standalone window (hidden root + own mainloop, used
-    before the main App exists) or as a modal child of an existing window
-    (used when the App is already running).
+    Opens either as a standalone window (on first run) or as a modal
     """
 
     QR_SIZE = 260
@@ -168,7 +166,7 @@ class LoginWindow(ctk.CTkToplevel):
         _login_dialog(_("error.dialog_title"), _("login.error_generic", error=str(error)), parent=self)
 
     def _finish_success(self) -> None:
-        """Disconnect the login client (so App's own client can reopen the session file) and close."""
+        """Disconnect the login client (so App's own client can reopen the session file) and close, or """
         self.result = True
         try:
             self.session.close()

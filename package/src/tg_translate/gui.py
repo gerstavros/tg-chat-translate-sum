@@ -8,6 +8,7 @@ import io
 import sys
 import os
 import re
+import shutil
 import threading
 import webbrowser
 from pathlib import Path
@@ -43,6 +44,8 @@ from .backend import (
     NotAuthorizedError,
     check_env,
     download_video_sync,
+    ensure_unread_setup,
+    install_unread,
     is_authorized_sync,
     list_chats_sync,
     load_window_geometry,
@@ -52,6 +55,8 @@ from .backend import (
     send_reaction_sync,
     translate_chat_sync,
 )
+
+from . import APP_VERSION
 
 # ── Theme ───────────────────────────────────────────────────────────────
 ctk.set_appearance_mode("system")
@@ -334,6 +339,9 @@ class App(ctk.CTk):
         if lang:
             self._rebuild_ui()
 
+        # confirms unread is setuped properly
+        ensure_unread_setup()
+
         self.after(100, self.load_chats)
 
     # ── Header ───────────────────────────────────────────────────────
@@ -352,7 +360,7 @@ class App(ctk.CTk):
 
     def _build_footer(self) -> None:
         footer = ctk.CTkFrame(self.main_frame, fg_color="transparent", height=30)
-        footer.grid(row=2, column=0, sticky="ew", padx=12, pady=(10, 8))
+        footer.grid(row=2, column=0, sticky="ew", padx=12, pady=(4, 8))
         footer.grid_columnconfigure(0, weight=1)
         self.footer_label = ctk.CTkLabel(footer, text="", font=("", 10))
         self.footer_label.grid(row=0, column=0, sticky="w")
@@ -528,16 +536,28 @@ class App(ctk.CTk):
     def _build_summary_tab(self) -> None:
         """Build the summary tab with a text area (mayby change it to something more nice instead of textarea?)"""
         self.tab_summary.grid_columnconfigure(0, weight=1)
-        self.tab_summary.grid_rowconfigure(0, weight=1)
+        self.tab_summary.grid_rowconfigure(2, weight=1)
+
+        # header + μπάρα, όπως στην καρτέλα Μετάφρασης
+        self.summary_header = ctk.CTkLabel(
+            self.tab_summary,
+            text=_("translate.placeholder"),
+            font=("", 14, "bold"),
+        )
+        self.summary_header.grid(row=0, column=0, sticky="w", pady=(0, 5))
+
+        self.summary_progress = ctk.CTkProgressBar(self.tab_summary)
+        self.summary_progress.grid(row=1, column=0, sticky="ew", pady=(0, 5))
+        self.summary_progress.set(0)
 
         self.summary_text = ctk.CTkTextbox(
             self.tab_summary, wrap="word", font=("", 16),
         )
-        self.summary_text.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        self.summary_text.grid(row=2, column=0, sticky="nsew", padx=0, pady=0)
         self.summary_text.insert("1.0", _("summary.placeholder") + "\n\n" + _("summary.hint") + "\n")
         _add_context_menu(self.summary_text)
         self.summary_mark_read_btn = ctk.CTkButton(self.tab_summary, text=_("translate.mark_read"), image=get("read"), compound="left", state="disabled", command=self.summary_mark_read)
-        self.summary_mark_read_btn.grid(row=2, column=0, sticky="w", padx=10, pady=(10, 0))
+        self.summary_mark_read_btn.grid(row=3, column=0, sticky="w", padx=10, pady=(10, 0))
 
     # ── Message bubbles (two-column) ─────────────────────────────────
 
@@ -779,13 +799,23 @@ class App(ctk.CTk):
         self.summary_text.delete("1.0", "end")
         self.summary_text.insert("1.0", _("summary.running", chat=chat.name) + "\n")
         self.footer_label.configure(text=_("summary.running", chat=chat.name))
+        status = _("translate.status_unread", count=chat.unread_count) if only_unread else _("translate.status_msgs", count=msg_count)
+        self.summary_header.configure(text=_("translate.header_title", chat=chat.name, status=status))
+
+        # σιγουρευόμαστε ότι το unread έχει τα δικά μας keys/session
+        ensure_unread_setup()
+        if shutil.which("unread") is None:
+            if not self._ask_install_unread(msg_count, only_unread):
+                return
+            return
+
         def _run():
             import subprocess
             import os
             try:
                 env = {**os.environ}
                 env["MAX_PER_CHAT"] = str(msg_count) if msg_count else str(MAX_PER_CHAT)
-                cmd = ["unread", ref, "--preset", "digest", "--report-language", "el", "--yes"]
+                cmd = ["unread", ref, "--preset", "digest", "--report-language", get_language(), "--yes"]
                 if not only_unread:
                     cmd.extend(["--last-msgs", str(msg_count)])
                 result = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -855,13 +885,38 @@ class App(ctk.CTk):
                             clean.append(s)
                         summary_text = "\n".join(clean).strip() or output
                     display = summary_text if summary_text else _("summary.empty")
-                    self.after(0, lambda: (self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), self.summary_text.insert("1.0", display), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.done")), self.summary_mark_read_btn.configure(state="normal")))
+                    self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(1), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), self.summary_text.insert("1.0", display), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.done")), self.summary_mark_read_btn.configure(state="normal")))
                 else:
                     error = result.stderr or "Unknown error"
-                    self.after(0, lambda: (self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), self.summary_text.insert("1.0", f"Error:\n{error}\n"), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.failed")), self.summary_mark_read_btn.configure(state="normal")))
+                    self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(0), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), self.summary_text.insert("1.0", f"Error:\n{error}\n"), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.failed")), self.summary_mark_read_btn.configure(state="normal")))
             except FileNotFoundError:
-                self.after(0, lambda: _ctk_dialog(_("error.dialog_title"), _("error.unread_not_found"), parent=self))
+                self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(0), self.summary_progress.configure(mode="determinate"), _ctk_dialog(_("error.dialog_title"), _("error.unread_not_found"), parent=self)))
+
+        self.summary_progress.configure(mode="indeterminate")
+        self.summary_progress.start()
         threading.Thread(target=_run, daemon=True).start()
+
+    def _ask_install_unread(self, msg_count, only_unread) -> bool:
+        """Ρωτάει τον χρήστη κι εγκαθιστά το unread αν συμφωνήσει."""
+        ok = self._ask_yes_no(_("unread.install_title"), _("unread.install_ask"), parent=self)
+        if not ok:
+            _ctk_dialog(_("error.dialog_title"), _("error.unread_not_found"), parent=self)
+            self.footer_label.configure(text=_("summary.failed"), image=get("error", size=14), compound="left")
+            return False
+        self.footer_label.configure(text=_("unread.installing"))
+        chat = self._current_chat
+
+        def _install():
+            done, err = install_unread()
+            if done:
+                self.after(0, lambda: (self.footer_label.configure(text=_("unread.install_ok")),
+                                       self._do_summary(chat, msg_count, only_unread)))
+            else:
+                self.after(0, lambda: self.footer_label.configure(
+                    text=_("unread.install_failed", error=err), image=get("error", size=14), compound="left"))
+
+        threading.Thread(target=_install, daemon=True).start()
+        return True
 
     def _select_chat(self, chat_id: int) -> None:
         """Highlight a chat item and deselect others."""
@@ -1449,8 +1504,14 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self._build_ui()
 
+        # fitting
+        self.update_idletasks()
+        need = self.winfo_reqheight()
+        if need > 500:
+            self.geometry(f"500x{min(need + 40, 800)}")
+
     def _on_lang_change(self, choice: str) -> None:
-        """Live language switch when combo changes."""
+        """αλλαγή γλώσσας αμέσως"""
         code = self._lang_map.get(choice, choice)
         set_language(code)
         self.current_lang = get_language()
@@ -1511,7 +1572,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.lang_combo.grid(row=8, column=1, sticky="w", **base_pad)
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=9, column=0, columnspan=2, pady=20)
+        btn_frame.grid(row=9, column=0, columnspan=2, pady=(12, 4))
         btn_frame.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkButton(btn_frame, text=_("settings.save"), command=self.save).grid(row=0, column=0, padx=10)
@@ -1519,6 +1580,10 @@ class SettingsDialog(ctk.CTkToplevel):
             btn_frame, text=_("settings.my_telegram"), image=get("link"),
             command=lambda: webbrowser.open("https://my.telegram.org"),
         ).grid(row=0, column=1, padx=10)
+
+        # version indicator
+        ctk.CTkLabel(self, text=f"v{APP_VERSION}", font=("", 10), text_color="#888888").grid(
+            row=10, column=0, columnspan=2, pady=(2, 10))
 
     def save(self) -> None:
         env_path = APP_ENV_PATH
@@ -1533,11 +1598,16 @@ class SettingsDialog(ctk.CTkToplevel):
             env_path.parent.mkdir(parents=True, exist_ok=True)
             with open(env_path, "w") as f:
                 f.write("\n".join(lines) + "\n")
+            try:
+                os.chmod(env_path, 0o600)  # τα .env να μην είναι readable από άλλους
+            except Exception:
+                pass
             os.environ["TG_API_ID"] = self.api_id_entry.get()
             os.environ["TG_API_HASH"] = self.api_hash_entry.get()
             os.environ["OPENAI_API_KEY"] = self.openai_entry.get()
             os.environ["TRANSLATE_MODEL"] = self.model_combo.get()
             os.environ["LANGUAGE"] = self._lang_map.get(self.lang_combo.get(), self.lang_combo.get())
+            ensure_unread_setup()  # και το unread να πάρει τα ίδια keys
             self.destroy()
         except Exception as e:
             _ctk_dialog(_("error.dialog_title"), _("settings.save_error_msg", error=str(e)), parent=self)

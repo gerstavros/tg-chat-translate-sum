@@ -32,6 +32,10 @@ def _load_env() -> None:
         if not APP_ENV_PATH.exists() and _LEGACY_PACKAGE_ENV.exists():
             APP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             shutil.copy2(_LEGACY_PACKAGE_ENV, APP_ENV_PATH)
+            try:
+                os.chmod(APP_ENV_PATH, 0o600)  # τα .env να μην είναι readable από άλλους
+            except Exception:
+                pass
     except Exception:
         pass
     for p in (APP_ENV_PATH, Path.cwd() / ".env", Path.home() / ".unread" / ".env"):
@@ -40,6 +44,11 @@ def _load_env() -> None:
 
 
 _load_env()
+
+# το unread/uv κάθονται στο ~/.local/bin — να τα βρίσκουμε πάντα
+_LOCAL_BIN = Path.home() / ".local" / "bin"
+if str(_LOCAL_BIN) not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = f"{_LOCAL_BIN}{os.pathsep}{os.environ.get('PATH', '')}"
 
 UNREAD_SESSION = Path.home() / ".unread" / "storage" / "session.sqlite.session"
 WINDOW_STATE_PATH = Path.home() / ".chat-translate-sum" / "window_state.json"
@@ -162,11 +171,9 @@ def _make_client_unconnected():
 
         raise RuntimeError(_("error.env_missing"))
 
-    session_path = str(UNREAD_SESSION)
-    if not Path(session_path).exists():
-        session_path = "tg-translate-session"
-
-    return TelegramClient(session_path, int(api_id), api_hash)
+    # πάντα το session του unread, όχι fallback στο CWD — το μοιραζόμαστε
+    UNREAD_SESSION.parent.mkdir(parents=True, exist_ok=True)
+    return TelegramClient(str(UNREAD_SESSION), int(api_id), api_hash)
 
 
 async def create_telegram_client():
@@ -433,7 +440,7 @@ def translate_messages(
     model: str = MODEL,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[MessageInfo]:
-    """Translate messages in batches of 10. Returns list of MessageInfo."""
+    """Translate messages in batches of 10. Returns list of MessageInfo. Test needed for bigger or smaller batchs"""
     BATCH_SIZE = 10
     texts = [m.text or "(media)" for m in messages]
     all_results: list[MessageInfo] = []
@@ -457,9 +464,7 @@ def translate_messages(
 
 # --- Mark as read ---
 
-
 async def mark_as_read(client, chat_id: int, last_msg_id: int) -> None:
-    """Mark all messages up to last_msg_id as read."""
     chat = await client.get_entity(chat_id)
     if last_msg_id:
         await client.send_read_acknowledge(chat, max_id=last_msg_id)
@@ -471,8 +476,74 @@ async def mark_as_read(client, chat_id: int, last_msg_id: int) -> None:
 
 
 def run_unread_summary(chat_ref: str) -> None:
-    """Run unread CLI for a chat summary."""
-    subprocess.run(["unread", chat_ref, "--report-language", "el"])
+    ensure_unread_setup()
+    from .i18n import get_language
+
+    subprocess.run(["unread", chat_ref, "--report-language", get_language()])
+
+
+def ensure_unread_setup() -> None:
+    """Γράφει τα αρχεία ρυθμίσεων του unread (~/.unread) από τα δικά μας keys,
+    ώστε να μη χρειάζεται δικό του setup. Το session το μοιραζόμαστε ήδη."""
+    try:
+        api_id = os.environ.get("TG_API_ID")
+        api_hash = os.environ.get("TG_API_HASH")
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not (api_id and api_hash and api_key):
+            return
+        unread_dir = Path.home() / ".unread"
+        unread_dir.mkdir(parents=True, exist_ok=True)
+        # προσοχή: το unread θέλει TELEGRAM_*, όχι TG_*
+        # και προσέχουμε να μη σβήσουμε άλλα κλειδιά του χρήστη (π.χ. anthropic)
+        env_file = unread_dir / ".env"
+        values = {}
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    values[k.strip()] = v.strip()
+        values.update({
+            "TELEGRAM_API_ID": api_id,
+            "TELEGRAM_API_HASH": api_hash,
+            "OPENAI_API_KEY": api_key,
+        })
+        env_file.write_text("".join(f"{k}={v}\n" for k, v in values.items()))
+        try:
+            os.chmod(env_file, 0o600)  # το unread αρνείται .env με 0644
+        except Exception:
+            pass
+        # αν το install.toml δεν έχει home, το unread νομίζει ότι δεν έγινε setup
+        install_toml = unread_dir / "install.toml"
+        home_line = (
+            re.search(r'home\s*=\s*"([^"]*)"', install_toml.read_text())
+            if install_toml.exists()
+            else None
+        )
+        if home_line is None or not home_line.group(1):
+            install_toml.write_text(
+                "# Written by `unread init`. Delete to re-pick the install folder.\n"
+                f'home ="{unread_dir}"\n'
+            )
+    except Exception:
+        pass  # μην σπάσει το app αν δεν γραφτούν
+
+
+def install_unread() -> tuple[bool, str]:
+    """ installs unread or/and uv if missing. returns (ok, error)."""
+    try:
+        if not shutil.which("uv"):
+            r = subprocess.run(
+                ["sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if r.returncode != 0:
+                return False, r.stderr.strip() or "uv install failed"
+        r = subprocess.run(["uv", "tool", "install", "unread"], capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            return False, r.stderr.strip() or "unread install failed"
+        return True, ""
+    except Exception as e:
+        return False, str(e)
 
 
 # --- Async runner (for sync contexts) ---
