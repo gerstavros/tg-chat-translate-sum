@@ -53,6 +53,8 @@ def build():
         # Icons (not sure if needed anymore as i added custom svg files in assets)
         "--hidden-import", "PIL",
         "--hidden-import", "cairosvg",
+        # QR login
+        "--hidden-import", "qrcode",
         # GUI
         "--hidden-import", "tkinter",
         "--hidden-import", "tkinter.messagebox",

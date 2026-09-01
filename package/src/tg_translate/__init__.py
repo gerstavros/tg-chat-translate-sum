@@ -11,6 +11,6 @@ from .backend import (
     check_env,
     list_chats_sync,
     mark_read_sync,
-    run_unread_summary,
+    summarize_chat_sync,
     translate_chat_sync,
 )

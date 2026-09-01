@@ -11,7 +11,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import threading
 from pathlib import Path
 from typing import Callable
@@ -21,7 +20,7 @@ from dotenv import load_dotenv
 # --- Load .env ---
 # Settings save to APP_ENV_PATH; older versions wrote next to the package
 # (package/.env). Migrate that file once so first-run credentials survive
-# restarts, then load with priority: app config dir > CWD (dev) > unread's.
+# restarts, then load with priority: app config dir > CWD (dev).
 APP_CONFIG_DIR = Path.home() / ".chat-translate-sum"
 APP_ENV_PATH = APP_CONFIG_DIR / ".env"
 _LEGACY_PACKAGE_ENV = Path(__file__).resolve().parent.parent.parent / ".env"
@@ -38,19 +37,14 @@ def _load_env() -> None:
                 pass
     except Exception:
         pass
-    for p in (APP_ENV_PATH, Path.cwd() / ".env", Path.home() / ".unread" / ".env"):
+    for p in (APP_ENV_PATH, Path.cwd() / ".env"):
         if p.exists():
             load_dotenv(p)
 
 
 _load_env()
 
-# το unread/uv κάθονται στο ~/.local/bin — να τα βρίσκουμε πάντα
-_LOCAL_BIN = Path.home() / ".local" / "bin"
-if str(_LOCAL_BIN) not in os.environ.get("PATH", ""):
-    os.environ["PATH"] = f"{_LOCAL_BIN}{os.pathsep}{os.environ.get('PATH', '')}"
-
-UNREAD_SESSION = Path.home() / ".unread" / "storage" / "session.sqlite.session"
+SESSION_PATH = Path.home() / ".chat-translate-sum" / "session.session"
 WINDOW_STATE_PATH = Path.home() / ".chat-translate-sum" / "window_state.json"
 _GEOMETRY_RE = re.compile(r"^\d+x\d+(\+-?\d+\+-?\d+)?$")
 
@@ -159,8 +153,23 @@ class NotAuthorizedError(RuntimeError):
     """Raised when an authorized Telegram session is required but missing."""
 
 
+def _migrate_legacy_session() -> None:
+    """Copy the old unread's Telegram session into our own path once, so the
+    user doesn't have to log in again after the unread removal."""
+    if SESSION_PATH.exists():
+        return
+    legacy = Path.home() / ".unread" / "storage" / "session.sqlite.session"
+    if not legacy.exists():
+        return
+    try:
+        SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy, SESSION_PATH)
+    except Exception:
+        pass
+
+
 def _make_client_unconnected():
-    """Build (but not connect) a Telethon client, reusing unread's session if available."""
+    """Build (but not connect) a Telethon client using our own session."""
     from telethon import TelegramClient
 
     api_id = os.environ.get("TG_API_ID")
@@ -171,9 +180,9 @@ def _make_client_unconnected():
 
         raise RuntimeError(_("error.env_missing"))
 
-    # πάντα το session του unread, όχι fallback στο CWD — το μοιραζόμαστε
-    UNREAD_SESSION.parent.mkdir(parents=True, exist_ok=True)
-    return TelegramClient(str(UNREAD_SESSION), int(api_id), api_hash)
+    _migrate_legacy_session()
+    SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return TelegramClient(str(SESSION_PATH), int(api_id), api_hash)
 
 
 async def create_telegram_client():
@@ -472,78 +481,219 @@ async def mark_as_read(client, chat_id: int, last_msg_id: int) -> None:
         await client.send_read_acknowledge(chat, clear_mentions=True)
 
 
-# --- Summary via unread ---
+# --- Summary ---
+
+SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", MODEL)
+SUMMARY_BATCH_CHARS = int(os.environ.get("SUMMARY_BATCH_CHARS", "6000"))
 
 
-def run_unread_summary(chat_ref: str) -> None:
-    ensure_unread_setup()
-    from .i18n import get_language
-
-    subprocess.run(["unread", chat_ref, "--report-language", get_language()])
-
-
-def ensure_unread_setup() -> None:
-    """Γράφει τα αρχεία ρυθμίσεων του unread (~/.unread) από τα δικά μας keys,
-    ώστε να μη χρειάζεται δικό του setup. Το session το μοιραζόμαστε ήδη."""
+def _message_link(chat: ChatInfo, msg_id: int) -> str:
+    """Build a Telegram message link for a chat, or '' if unknown."""
     try:
-        api_id = os.environ.get("TG_API_ID")
-        api_hash = os.environ.get("TG_API_HASH")
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not (api_id and api_hash and api_key):
-            return
-        unread_dir = Path.home() / ".unread"
-        unread_dir.mkdir(parents=True, exist_ok=True)
-        # προσοχή: το unread θέλει TELEGRAM_*, όχι TG_*
-        # και προσέχουμε να μη σβήσουμε άλλα κλειδιά του χρήστη (π.χ. anthropic)
-        env_file = unread_dir / ".env"
-        values = {}
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                if "=" in line:
-                    k, _, v = line.partition("=")
-                    values[k.strip()] = v.strip()
-        values.update({
-            "TELEGRAM_API_ID": api_id,
-            "TELEGRAM_API_HASH": api_hash,
-            "OPENAI_API_KEY": api_key,
-        })
-        env_file.write_text("".join(f"{k}={v}\n" for k, v in values.items()))
-        try:
-            os.chmod(env_file, 0o600)  # το unread αρνείται .env με 0644
-        except Exception:
-            pass
-        # αν το install.toml δεν έχει home, το unread νομίζει ότι δεν έγινε setup
-        install_toml = unread_dir / "install.toml"
-        home_line = (
-            re.search(r'home\s*=\s*"([^"]*)"', install_toml.read_text())
-            if install_toml.exists()
-            else None
-        )
-        if home_line is None or not home_line.group(1):
-            install_toml.write_text(
-                "# Written by `unread init`. Delete to re-pick the install folder.\n"
-                f'home ="{unread_dir}"\n'
-            )
+        if chat.username:
+            return f"https://t.me/{chat.username}/{msg_id}"
+        return f"https://t.me/c/{chat.id}/{msg_id}"
     except Exception:
-        pass  # μην σπάσει το app αν δεν γραφτούν
+        return ""
 
 
-def install_unread() -> tuple[bool, str]:
-    """ installs unread or/and uv if missing. returns (ok, error)."""
+def _message_line(msg, chat: ChatInfo) -> str:
+    """Render a single Telethon message as a compact digest line."""
+    time_str = "?"
+    if msg.date:
+        try:
+            time_str = msg.date.strftime("%H:%M")
+        except Exception:
+            time_str = "?"
+    name = None
+    if msg.sender:
+        name = (
+            getattr(msg.sender, "first_name", None)
+            or getattr(msg.sender, "title", None)
+            or getattr(msg.sender, "username", None)
+        )
+    reactions = ""
     try:
-        if not shutil.which("uv"):
-            r = subprocess.run(
-                ["sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
-                capture_output=True, text=True, timeout=300,
-            )
-            if r.returncode != 0:
-                return False, r.stderr.strip() or "uv install failed"
-        r = subprocess.run(["uv", "tool", "install", "unread"], capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            return False, r.stderr.strip() or "unread install failed"
-        return True, ""
-    except Exception as e:
-        return False, str(e)
+        if msg.reactions and getattr(msg.reactions, "results", None):
+            counts = [f"{r.reaction.emoticon}×{r.count}" for r in msg.reactions.results if getattr(r, "reaction", None) and hasattr(r.reaction, "emoticon")]
+            if counts:
+                reactions = " [reactions: " + ", ".join(counts) + "]"
+    except Exception:
+        pass
+    text = (msg.text or "").strip()
+    if not text:
+        if msg.photo:
+            text = "[photo]"
+        elif msg.video:
+            text = "[video]"
+        elif getattr(msg, "document", None):
+            text = "[document]"
+        elif msg.sticker:
+            text = "[sticker]"
+        else:
+            text = "[media]"
+    link = _message_link(chat, msg.id or 0)
+    cite = f"[#{msg.id}]({link})" if link else f"#{msg.id}"
+    author = f" {name}:" if name else ":"
+    return f"[{time_str}] {author} {text}{reactions} {cite}"
+
+
+def _summary_prompt(
+    lang_code: str, lang_name: str, lines: list[str], phase: str
+) -> tuple[str, str]:
+    """Return (system, user) for a digest chunk or for the final merge.
+
+    `phase` is "map" (one chunk) or "reduce" (merging chunk digests).
+    Format mirrors the unread `summary` preset: TL;DR + Main + Ideas and
+    Decisions + Worth checking, written in the user's UI language.
+    """
+    body = "\n\n".join(f"{i + 1}. {ln}" for i, ln in enumerate(lines))
+
+    lang_rule = (
+        f"Write the entire analysis in `{lang_name}` (language code `{lang_code}`). "
+        "Detect the source messages' language yourself — if it differs from the "
+        "output language, write the analysis in the output language anyway. "
+        "Direct quotations stay in the source language; everything else — "
+        "headings, bullets, prose — is in the output language."
+    )
+
+    if phase == "map":
+        system = (
+            "You are an attentive Telegram chat reader producing a report called "
+            "`summary` for a busy person. Give them a concentrate, not a recap. "
+            "Rely only on the provided messages; never invent facts.\n\n"
+            "Genre rules (strict):\n"
+            "- No retelling. If your wording is close to what the author wrote, it's "
+            "not an insight — drop it.\n"
+            "- Cut the chatter: greetings, acknowledgements, 'ok', 'thanks', lone "
+            "emoji, unanswered questions don't belong.\n"
+            "- One bullet = one conclusion. Don't pile several subjects into one line.\n"
+            "- Prefer concrete to abstract. 'Team agreed to switch from Y to X because "
+            "of Z' is good; 'discussed strategy' is bad.\n"
+            "- As many bullets as warranted, no more. A short exchange can compress to "
+            "2-3 bullets; don't stretch to a round number.\n"
+            "- Reactions tags (`[reactions: 👍×N ...]`) signal messages the chat "
+            "responded to — prefer them, but reactions alone don't make a banal "
+            "message valuable.\n"
+            "- Every bullet must cite a specific message via the `[#<id>](link)` that "
+            "appears at the end of the message line. Keep those links verbatim.\n\n"
+            "Output the report in strict markdown with these sections:\n"
+            "## TL;DR\n"
+            "One or two lines: what happened in the chat during the period.\n\n"
+            "## Main\n"
+            "2-4 bullets of the concentrated insights/takeaways the chat produced. "
+            "Each bullet: what's specifically new/important + a citation.\n\n"
+            "## Ideas and Decisions\n"
+            "What was proposed or decided, what can be taken on. Skip this section "
+            "entirely if there was nothing of the sort.\n\n"
+            "## Worth checking\n"
+            "3-5 messages that give the most signal per byte, each with a link and a "
+            "one-line reason to read it.\n\n"
+            "If the chat had nothing valuable (just greetings, stickers, etc.), write "
+            "a single line: 'Nothing valuable was discussed during the period.' and "
+            "stop. Do not stretch.\n\n"
+            + lang_rule
+        )
+        user = (
+            "Analyze this Telegram chat and produce the `summary` report.\n\n"
+            f"{body}"
+        )
+    else:  # reduce
+        system = (
+            "Below are several already-written summaries of the same chat, produced "
+            "from different chunks of the conversation. Merge them into ONE final "
+            "report in the requested format.\n\n"
+            "Merge rules:\n"
+            "1. Don't duplicate bullets. If the same thought appears in multiple "
+            "chunks, combine into one bullet, gathering all relevant citations.\n"
+            "2. Preserve the section structure (## TL;DR, ## Main, ## Ideas and "
+            "Decisions, ## Worth checking).\n"
+            "3. Keep the limits: 2-4 Main bullets, 3-5 Worth checking. Drop middling "
+            "bullets rather than ship a wall.\n"
+            "4. TL;DR appears exactly once — pick the best variant or rewrite, don't "
+            "concatenate.\n"
+            "5. Keep facts intact: numbers, names, [#N](link) citations — verbatim.\n\n"
+            + lang_rule
+        )
+        user = f"Merge these chunk summaries into one final report:\n\n{body}"
+
+    return system, user
+
+
+def _summarize_chunk(
+    lines: list[str], api_key: str, model: str, phase: str = "map"
+) -> str:
+    """Send one chunk (or the merge of chunk digests) to OpenAI."""
+    from openai import OpenAI
+
+    from .i18n import get_language, language_name
+
+    client = OpenAI(api_key=api_key)
+    lang = get_language()
+
+    system, user = _summary_prompt(lang, language_name(lang), lines, phase)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content or ""
+
+
+def summarize_chat_sync(
+    chat: ChatInfo,
+    api_key: str,
+    model: str = SUMMARY_MODEL,
+    max_msgs: int = MAX_PER_CHAT,
+    only_unread: bool = True,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> tuple[str, int]:
+    """Sync wrapper: summarize messages for a chat via OpenAI.
+
+    Returns (report_text, message_count). Empty report on no messages.
+    """
+    async def _run():
+        client = await create_telegram_client()
+        try:
+            if only_unread:
+                msgs = await fetch_unread_messages(client, chat, max_msgs)
+            else:
+                msgs = await fetch_last_messages(client, chat, max_msgs)
+            if not msgs:
+                return "", 0
+
+            digests: list[str] = []
+            chunk: list[str] = []
+            chunk_chars = 0
+            total = len(msgs)
+            done = 0
+            for msg in msgs:
+                line = _message_line(msg, chat)
+                chunk.append(line)
+                chunk_chars += len(line) + 1
+                done += 1
+                if chunk_chars >= SUMMARY_BATCH_CHARS:
+                    digests.append(_summarize_chunk(chunk, api_key, model, phase="map"))
+                    chunk, chunk_chars = [], 0
+                    if progress_callback:
+                        progress_callback(done, total)
+            if chunk:
+                digests.append(_summarize_chunk(chunk, api_key, model, phase="map"))
+            if progress_callback:
+                progress_callback(total, total)
+
+            if len(digests) == 1:
+                return digests[0], total
+
+            merged = _summarize_chunk(digests, api_key, model, phase="reduce")
+            return merged, total
+        finally:
+            await client.disconnect()
+
+    return _run_async(_run)
 
 
 # --- Async runner (for sync contexts) ---

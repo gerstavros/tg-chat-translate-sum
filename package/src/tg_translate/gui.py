@@ -8,7 +8,6 @@ import io
 import sys
 import os
 import re
-import shutil
 import threading
 import webbrowser
 from pathlib import Path
@@ -44,15 +43,13 @@ from .backend import (
     NotAuthorizedError,
     check_env,
     download_video_sync,
-    ensure_unread_setup,
-    install_unread,
     is_authorized_sync,
     list_chats_sync,
     load_window_geometry,
     mark_read_sync,
-    run_unread_summary,
     save_window_geometry,
     send_reaction_sync,
+    summarize_chat_sync,
     translate_chat_sync,
 )
 
@@ -400,9 +397,6 @@ class App(ctk.CTk):
             pass
         if lang:
             self._rebuild_ui()
-
-        # confirms unread is setuped properly
-        ensure_unread_setup()
 
         self.after(100, self.load_chats)
 
@@ -855,7 +849,6 @@ class App(ctk.CTk):
 
     def _do_summary(self, chat, msg_count, only_unread=True) -> None:
         self._current_chat = chat
-        ref = f"@{chat.username}" if chat.username else chat.name
         self.tab_view.set(_("tab.summary"))
         self.summary_text.configure(state="normal")
         self.summary_text.delete("1.0", "end")
@@ -864,121 +857,29 @@ class App(ctk.CTk):
         status = _("translate.status_unread", count=chat.unread_count) if only_unread else _("translate.status_msgs", count=msg_count)
         self.summary_header.configure(text=_("translate.header_title", chat=chat.name, status=status))
 
-        # σιγουρευόμαστε ότι το unread έχει τα δικά μας keys/session
-        ensure_unread_setup()
-        if shutil.which("unread") is None:
-            if not self._ask_install_unread(msg_count, only_unread):
-                return
-            return
-
         def _run():
-            import subprocess
-            import os
             try:
-                env = {**os.environ}
-                env["MAX_PER_CHAT"] = str(msg_count) if msg_count else str(MAX_PER_CHAT)
-                cmd = ["unread", ref, "--preset", "digest", "--report-language", get_language(), "--yes"]
-                if not only_unread:
-                    cmd.extend(["--last-msgs", str(msg_count)])
-                result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-                if result.returncode == 0:
-                    output = result.stdout
-                    lines = output.split("\n")
-                    digest_lines = []
-                    in_digest = False
-                    for line in lines:
-                        stripped = line.strip()
-                        if stripped in ("Digest", "TL;DR"):
-                            in_digest = True
-                            continue
-                        if in_digest:
-                            if stripped.startswith("\u2500") or stripped.startswith("Total messages"):
-                                break
-                            digest_lines.append(stripped)
-                    # Fallback: extract bullet-point content (actual summary output)
-                    if not digest_lines:
-                        in_content = False
-                        for line in lines:
-                            s = line.strip()
-                            if s.startswith(("•", "*")):
-                                in_content = True
-                            if in_content:
-                                if s.startswith("Also saved"):
-                                    break
-                                if not s or s.startswith(("Estimated", "Run preset", "Chat ID", "Link:", "Period:", "Messages", "Breakdown", "Preset:", "Model:", "Chunks:", "Cache:", "Enrichment:", "Cost:", "Generated:")):
-                                    continue
-                                digest_lines.append(s)
-                    # Final fallback: grab everything after "Generated:" 
-                    if not digest_lines:
-                        after_gen = False
-                        for line in lines:
-                            s = line.strip()
-                            if s.startswith("Generated:"):
-                                after_gen = True
-                                continue
-                            if after_gen:
-                                if s.startswith("Also saved"):
-                                    break
-                                if not s:
-                                    continue
-                                digest_lines.append(s)
-                    summary_text = "\n".join(digest_lines).strip()
-                    api_key = os.environ.get("OPENAI_API_KEY")
-                    if api_key and summary_text:
-                        try:
-                            from openai import OpenAI
-                            oc = OpenAI(api_key=api_key)
-                            lang_target = language_name(get_language())
-                            resp = oc.chat.completions.create(model=MODEL, messages=[{"role": "system", "content": f"Translate to {lang_target}. Keep all info, links."}, {"role": "user", "content": summary_text}], temperature=0.05)
-                            translated = resp.choices[0].message.content
-                            if translated:
-                                summary_text = translated
-                        except Exception:
-                            pass
-                    if not summary_text and output:
-                        # Clean raw output: remove CLI/report noise, keep content
-                        clean = []
-                        for line in output.split("\n"):
-                            s = line.strip()
-                            if not s or s.startswith(("─", "---", "══", "Chat:", "Messages:", "Report:", "unread", "Saved", "You can")):
-                                continue
-                            if re.match(r"^[─═\s]*$", s):
-                                continue
-                            clean.append(s)
-                        summary_text = "\n".join(clean).strip() or output
-                    display = summary_text if summary_text else _("summary.empty")
-                    self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(1), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), _insert_with_links(self.summary_text, display), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.done")), self.summary_mark_read_btn.configure(state="normal")))
-                else:
-                    error = result.stderr or "Unknown error"
-                    self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(0), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), _insert_with_links(self.summary_text, f"Error:\n{error}\n"), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.failed")), self.summary_mark_read_btn.configure(state="normal")))
-            except FileNotFoundError:
-                self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(0), self.summary_progress.configure(mode="determinate"), _ctk_dialog(_("error.dialog_title"), _("error.unread_not_found"), parent=self)))
+                api_key = os.environ.get("OPENAI_API_KEY")
+                if not api_key:
+                    self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(0), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), _insert_with_links(self.summary_text, _("error.env_missing")), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.failed"))))
+                    return
+                digest, count = summarize_chat_sync(
+                    chat,
+                    api_key,
+                    max_msgs=msg_count or MAX_PER_CHAT,
+                    only_unread=only_unread,
+                    progress_callback=lambda done, total: self.after(
+                        0, lambda: (self.summary_progress.configure(mode="determinate"), self.summary_progress.set(done / total if total else 1), self.summary_progress.configure(maximum=1))
+                    ),
+                )
+                display = digest if digest else _("summary.empty")
+                self.after(0, lambda: (self.summary_progress.stop(), self.summary_progress.set(1), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), _insert_with_links(self.summary_text, display), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.done")), self.summary_mark_read_btn.configure(state="normal")))
+            except Exception as e:
+                self.after(0, lambda err=str(e): (self.summary_progress.stop(), self.summary_progress.set(0), self.summary_progress.configure(mode="determinate"), self.summary_text.configure(state="normal"), self.summary_text.delete("1.0", "end"), _insert_with_links(self.summary_text, f"Error:\n{err}\n"), self.summary_text.configure(state="disabled"), self.footer_label.configure(text=_("summary.failed"))))
 
         self.summary_progress.configure(mode="indeterminate")
         self.summary_progress.start()
         threading.Thread(target=_run, daemon=True).start()
-
-    def _ask_install_unread(self, msg_count, only_unread) -> bool:
-        """Ρωτάει τον χρήστη κι εγκαθιστά το unread αν συμφωνήσει."""
-        ok = self._ask_yes_no(_("unread.install_title"), _("unread.install_ask"), parent=self)
-        if not ok:
-            _ctk_dialog(_("error.dialog_title"), _("error.unread_not_found"), parent=self)
-            self.footer_label.configure(text=_("summary.failed"), image=get("error", size=14), compound="left")
-            return False
-        self.footer_label.configure(text=_("unread.installing"))
-        chat = self._current_chat
-
-        def _install():
-            done, err = install_unread()
-            if done:
-                self.after(0, lambda: (self.footer_label.configure(text=_("unread.install_ok")),
-                                       self._do_summary(chat, msg_count, only_unread)))
-            else:
-                self.after(0, lambda: self.footer_label.configure(
-                    text=_("unread.install_failed", error=err), image=get("error", size=14), compound="left"))
-
-        threading.Thread(target=_install, daemon=True).start()
-        return True
 
     def _select_chat(self, chat_id: int) -> None:
         """Highlight a chat item and deselect others."""
@@ -1669,7 +1570,6 @@ class SettingsDialog(ctk.CTkToplevel):
             os.environ["OPENAI_API_KEY"] = self.openai_entry.get()
             os.environ["TRANSLATE_MODEL"] = self.model_combo.get()
             os.environ["LANGUAGE"] = self._lang_map.get(self.lang_combo.get(), self.lang_combo.get())
-            ensure_unread_setup()  # και το unread να πάρει τα ίδια keys
             self.destroy()
         except Exception as e:
             _ctk_dialog(_("error.dialog_title"), _("settings.save_error_msg", error=str(e)), parent=self)
