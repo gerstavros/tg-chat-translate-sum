@@ -538,61 +538,42 @@ def _message_line(msg, chat: ChatInfo) -> str:
     return f"[{time_str}] {author} {text}{reactions} {cite}"
 
 
-def _summary_prompt(
-    lang_code: str, lang_name: str, lines: list[str], phase: str
-) -> tuple[str, str]:
-    """Return (system, user) for a digest chunk or for the final merge.
+def _summary_targets(msg_count: int) -> tuple[int, int]:
+    """Return (main_min, main_max) bullets for a chat of this size."""
+    if msg_count <= 20:
+        return 6, 10
+    if msg_count <= 60:
+        return 10, 15
+    if msg_count <= 150:
+        return 15, 25
+    return 20, 35
 
-    `phase` is "map" (one chunk) or "reduce" (merging chunk digests).
-    Format mirrors the unread `summary` preset: TL;DR + Main + Ideas and
-    Decisions + Worth checking, written in the user's UI language.
-    """
+
+def _summary_prompt(
+    lang_code: str, lang_name: str, lines: list[str], phase: str, msg_count: int
+) -> tuple[str, str]:
+    """Return (system, user) for a digest chunk or for the final merge."""
     body = "\n\n".join(f"{i + 1}. {ln}" for i, ln in enumerate(lines))
 
-    lang_rule = (
-        f"Write the entire analysis in `{lang_name}` (language code `{lang_code}`). "
-        "Detect the source messages' language yourself — if it differs from the "
-        "output language, write the analysis in the output language anyway. "
-        "Direct quotations stay in the source language; everything else — "
-        "headings, bullets, prose — is in the output language."
-    )
+    main_min, main_max = _summary_targets(msg_count)
 
     if phase == "map":
         system = (
-            "You are an attentive Telegram chat reader producing a report called "
-            "`summary` for a busy person. Give them a concentrate, not a recap. "
-            "Rely only on the provided messages; never invent facts.\n\n"
-            "Genre rules (strict):\n"
-            "- No retelling. If your wording is close to what the author wrote, it's "
-            "not an insight — drop it.\n"
-            "- Cut the chatter: greetings, acknowledgements, 'ok', 'thanks', lone "
-            "emoji, unanswered questions don't belong.\n"
-            "- One bullet = one conclusion. Don't pile several subjects into one line.\n"
-            "- Prefer concrete to abstract. 'Team agreed to switch from Y to X because "
-            "of Z' is good; 'discussed strategy' is bad.\n"
-            "- As many bullets as warranted, no more. A short exchange can compress to "
-            "2-3 bullets; don't stretch to a round number.\n"
-            "- Reactions tags (`[reactions: 👍×N ...]`) signal messages the chat "
-            "responded to — prefer them, but reactions alone don't make a banal "
-            "message valuable.\n"
-            "- Every bullet must cite a specific message via the `[#<id>](link)` that "
-            "appears at the end of the message line. Keep those links verbatim.\n\n"
-            "Output the report in strict markdown with these sections:\n"
-            "## TL;DR\n"
-            "One or two lines: what happened in the chat during the period.\n\n"
-            "## Main\n"
-            "2-4 bullets of the concentrated insights/takeaways the chat produced. "
-            "Each bullet: what's specifically new/important + a citation.\n\n"
-            "## Ideas and Decisions\n"
-            "What was proposed or decided, what can be taken on. Skip this section "
-            "entirely if there was nothing of the sort.\n\n"
-            "## Worth checking\n"
-            "3-5 messages that give the most signal per byte, each with a link and a "
-            "one-line reason to read it.\n\n"
-            "If the chat had nothing valuable (just greetings, stickers, etc.), write "
-            "a single line: 'Nothing valuable was discussed during the period.' and "
-            "stop. Do not stretch.\n\n"
-            + lang_rule
+            f"You are a Telegram chat analyst. Produce a `summary` for someone "
+            f"who missed the chat. Use ONLY the provided messages — never invent.\n\n"
+            f"Write in `{lang_name}` (`{lang_code}`). Quotations stay in source language.\n\n"
+            "Rules:\n"
+            "- Skip greetings, stickers, 'ok', lone emoji, unanswered questions.\n"
+            "- One bullet = one concrete insight, not abstract summaries.\n"
+            "- Cover ALL significant themes — scale depth to chat size.\n"
+            "- Every bullet cites `[#<id>](link)` verbatim from the message lines.\n"
+            "- Reactions signal important messages — prefer them.\n\n"
+            "## TL;DR\n1-2 lines.\n\n"
+            f"## Main\n{main_min}-{main_max} bullets: what's new/important + citation.\n\n"
+            "## Ideas and Decisions\nProposals, decisions, action items. Skip if none.\n\n"
+            "## Important messages\n"
+            f"{'5-8' if msg_count >= 60 else '3-5'} most signal-rich with link + reason.\n\n"
+            "Nothing valuable? Write 'Nothing valuable was discussed.' and stop.\n"
         )
         user = (
             "Analyze this Telegram chat and produce the `summary` report.\n\n"
@@ -600,20 +581,11 @@ def _summary_prompt(
         )
     else:  # reduce
         system = (
-            "Below are several already-written summaries of the same chat, produced "
-            "from different chunks of the conversation. Merge them into ONE final "
-            "report in the requested format.\n\n"
-            "Merge rules:\n"
-            "1. Don't duplicate bullets. If the same thought appears in multiple "
-            "chunks, combine into one bullet, gathering all relevant citations.\n"
-            "2. Preserve the section structure (## TL;DR, ## Main, ## Ideas and "
-            "Decisions, ## Worth checking).\n"
-            "3. Keep the limits: 2-4 Main bullets, 3-5 Worth checking. Drop middling "
-            "bullets rather than ship a wall.\n"
-            "4. TL;DR appears exactly once — pick the best variant or rewrite, don't "
-            "concatenate.\n"
-            "5. Keep facts intact: numbers, names, [#N](link) citations — verbatim.\n\n"
-            + lang_rule
+            "Merge these chunk summaries into ONE final report.\n"
+            "Rules: de-duplicate (combine same-thought bullets, gather citations), "
+            f"keep {main_min}-{main_max} Main bullets, preserve ## TL;DR / Main / Ideas / Important structure. "
+            "TL;DR appears once. Keep numbers, names, [#N](link) verbatim.\n\n"
+            f"Write in `{lang_name}` (`{lang_code}`). Quotations stay in source language."
         )
         user = f"Merge these chunk summaries into one final report:\n\n{body}"
 
@@ -621,7 +593,7 @@ def _summary_prompt(
 
 
 def _summarize_chunk(
-    lines: list[str], api_key: str, model: str, phase: str = "map"
+    lines: list[str], api_key: str, model: str, phase: str = "map", msg_count: int = 0
 ) -> str:
     """Send one chunk (or the merge of chunk digests) to OpenAI."""
     from openai import OpenAI
@@ -631,7 +603,7 @@ def _summarize_chunk(
     client = OpenAI(api_key=api_key)
     lang = get_language()
 
-    system, user = _summary_prompt(lang, language_name(lang), lines, phase)
+    system, user = _summary_prompt(lang, language_name(lang), lines, phase, msg_count)
     resp = client.chat.completions.create(
         model=model,
         messages=[
@@ -676,19 +648,19 @@ def summarize_chat_sync(
                 chunk_chars += len(line) + 1
                 done += 1
                 if chunk_chars >= SUMMARY_BATCH_CHARS:
-                    digests.append(_summarize_chunk(chunk, api_key, model, phase="map"))
+                    digests.append(_summarize_chunk(chunk, api_key, model, phase="map", msg_count=total))
                     chunk, chunk_chars = [], 0
                     if progress_callback:
                         progress_callback(done, total)
             if chunk:
-                digests.append(_summarize_chunk(chunk, api_key, model, phase="map"))
+                digests.append(_summarize_chunk(chunk, api_key, model, phase="map", msg_count=total))
             if progress_callback:
                 progress_callback(total, total)
 
             if len(digests) == 1:
                 return digests[0], total
 
-            merged = _summarize_chunk(digests, api_key, model, phase="reduce")
+            merged = _summarize_chunk(digests, api_key, model, phase="reduce", msg_count=total)
             return merged, total
         finally:
             await client.disconnect()
