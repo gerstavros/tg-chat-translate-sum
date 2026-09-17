@@ -832,7 +832,11 @@ class App(ctk.CTk):
 
             self.after(0, lambda: self.footer_label.configure(text=_("translate.translating", count=total, model=MODEL)))
             from .backend import translate_messages
-            translations = translate_messages(raw_msgs, api_key, MODEL, progress_callback=lambda n, t: self.after(0, lambda: self.progress_bar.set(n / t)))
+            try:
+                translations = translate_messages(raw_msgs, api_key, MODEL, progress_callback=lambda n, t: self.after(0, lambda: self.progress_bar.set(n / t)))
+            except Exception as err:
+                self.after(0, lambda err=err: self._show_translate_error(err, MODEL))
+                return
             self._translated_msgs = translations
             for i, minfo in enumerate(translations):
                 t = minfo.translation
@@ -1191,6 +1195,16 @@ class App(ctk.CTk):
             return
         self.footer_label.configure(text=str(error), image=get("error", size=14), compound="left")
 
+    def _show_translate_error(self, error, model: str = "") -> None:
+        """Show the API error in the footer and re-enable retranslation."""
+        detail = str(error).strip() or error.__class__.__name__
+        self.footer_label.configure(
+            text=_("translate.failed", model=model or MODEL, error=detail),
+            image=get("error", size=14),
+            compound="left",
+        )
+        self._set_retranslate_state("normal")
+
     def _set_retranslate_state(self, state: str) -> None:
         for child in self.tab_translate.winfo_children():
             if isinstance(child, ctk.CTkFrame):
@@ -1241,7 +1255,7 @@ class App(ctk.CTk):
                 self.after(0, lambda: self.footer_label.configure(text=_("translate.done", count=len(new_msgs), cost=0, model=model)))
                 self.after(0, lambda: self._set_retranslate_state("normal"))
             except Exception as e:
-                self.after(0, lambda: _ctk_dialog(_("error.dialog_title"), str(e), parent=self))
+                self.after(0, lambda e=e: self._show_translate_error(e, model))
         threading.Thread(target=_work, daemon=True).start()
 
     def summary_selected(self) -> None:

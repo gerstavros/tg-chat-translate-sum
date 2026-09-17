@@ -20,6 +20,7 @@
   "translate.translating": "Translating {count} messages ({model})...",
   "translate.done": "{count} messages · ${cost:.4f} · model: {model}",
   "translate.error": "Error",
+  "translate.failed": "❌ Translation failed ({model}): {error}",
   "translate.pending": "Translation in progress...",
   "translate.no_new": "No new messages",
   "translate.mark_read": "Mark as read",

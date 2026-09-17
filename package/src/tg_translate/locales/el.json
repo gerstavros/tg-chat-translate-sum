@@ -20,6 +20,7 @@
   "translate.translating": "Μετάφραση {count} μηνυμάτων ({model})...",
   "translate.done": "{count} μηνύματα · ~${cost:.4f} · μοντέλο: {model}",
   "translate.error": "❌ Σφάλμα",
+  "translate.failed": "❌ Σφάλμα μετάφρασης ({model}): {error}",
   "translate.pending": "⏳ Μετάφραση σε εξέλιξη...",
   "translate.no_new": "Κανένα νέο μήνυμα",
   "translate.mark_read": "Σημείωση ως διαβασμένα",
