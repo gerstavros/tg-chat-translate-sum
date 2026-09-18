@@ -49,24 +49,52 @@ WINDOW_STATE_PATH = Path.home() / ".chat-translate-sum" / "window_state.json"
 _GEOMETRY_RE = re.compile(r"^\d+x\d+(\+-?\d+\+-?\d+)?$")
 
 
-def load_window_geometry() -> str | None:
-    """Return the main window's last-saved geometry or none."""
+def _load_window_state() -> dict:
+    """Return the persisted window state (geometry, appearance, ...)."""
     try:
-        geometry = json.loads(WINDOW_STATE_PATH.read_text()).get("geometry")
-        if isinstance(geometry, str) and _GEOMETRY_RE.match(geometry):
-            return geometry
+        state = json.loads(WINDOW_STATE_PATH.read_text())
+        return state if isinstance(state, dict) else {}
+    except Exception:
+        return {}
+
+
+def _update_window_state(**values) -> None:
+    """Merge values into the persisted window state, best-effort."""
+    state = _load_window_state()
+    state.update(values)
+    try:
+        WINDOW_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        WINDOW_STATE_PATH.write_text(json.dumps(state))
     except Exception:
         pass
+
+
+def load_window_geometry() -> str | None:
+    """Return the main window's last-saved geometry or none."""
+    geometry = _load_window_state().get("geometry")
+    if isinstance(geometry, str) and _GEOMETRY_RE.match(geometry):
+        return geometry
     return None
 
 
 def save_window_geometry(geometry: str) -> None:
     """Persist the main window's geometry so it can be restored on next launch."""
-    try:
-        WINDOW_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        WINDOW_STATE_PATH.write_text(json.dumps({"geometry": geometry}))
-    except Exception:
-        pass
+    _update_window_state(geometry=geometry)
+
+
+APPEARANCE_MODES = ("light", "dark")
+
+
+def load_appearance() -> str | None:
+    """Return the saved appearance mode ("light"/"dark"), or None to follow the system."""
+    mode = _load_window_state().get("appearance")
+    return mode if mode in APPEARANCE_MODES else None
+
+
+def save_appearance(mode: str) -> None:
+    """Persist the appearance mode picked with the header toggle."""
+    if mode in APPEARANCE_MODES:
+        _update_window_state(appearance=mode)
 
 # --- Config ---
 MODEL = os.environ.get("TRANSLATE_MODEL", "gpt-4.1-mini")

@@ -45,8 +45,10 @@ from .backend import (
     download_video_sync,
     is_authorized_sync,
     list_chats_sync,
+    load_appearance,
     load_window_geometry,
     mark_read_sync,
+    save_appearance,
     save_window_geometry,
     send_reaction_sync,
     summarize_chat_sync,
@@ -88,6 +90,39 @@ def _ctk_dialog(title, message, parent=None):
         parent.wait_window(dlg)
 
 
+def _theme_colors() -> dict[str, str]:
+    """Resolve the hard-coded palette for the active appearance mode.
+
+    CustomTkinter restyles its own widgets when the appearance mode changes,
+    but the colors passed explicitly below are frozen once a widget exists.
+    They all come from here so a theme switch can re-apply them.
+    """
+    dark = ctk.get_appearance_mode() == "Dark"
+    return {
+        "bubble_bg": "#2a2a2a" if dark else "#e8e8e8",
+        "bubble_border": "#3a3a3a" if dark else "#d0d0d0",
+        "bubble_text": "#e0e0e0" if dark else "#333333",
+        "header_fg": "#aaaaaa" if dark else "#666666",
+        "muted_fg": "#888888",
+        "highlight_bg": "#3B8ED0" if dark else "#5EB5F7",
+        "username_fg": "gray60" if dark else "gray40",
+        "code_fg": "#00cc66" if dark else "#2d7d2d",
+        "code_bg": "#333333" if dark else "#e8e8e8",
+        "pre_fg": "#e0e0e0" if dark else "#333333",
+        "pre_bg": "#2d2d2d" if dark else "#f0f0f0",
+    }
+
+
+def _restyle_inline_tags(tw) -> None:
+    """Re-apply the appearance-dependent colors of inline code/pre tags."""
+    existing = tw.tag_names()
+    c = _theme_colors()
+    if "code" in existing:
+        tw.tag_config("code", foreground=c["code_fg"], background=c["code_bg"])
+    if "pre" in existing:
+        tw.tag_config("pre", foreground=c["pre_fg"], background=c["pre_bg"])
+
+
 def _apply_formatting(widget, text: str) -> None:
     # Use internal _textbox for CTkTextbox (bypasses font restriction in tag_config)
     if hasattr(widget, '_textbox'):
@@ -111,18 +146,13 @@ def _apply_formatting(widget, text: str) -> None:
                 tw.tag_config("italic", font=("TkDefaultFont", 12, "italic"))
             elif tag_name == "strike":
                 tw.tag_config("strike", overstrike=True, font=("TkDefaultFont", 12, "overstrike"))
-            elif tag_name == "code":
-                fg = "#00cc66" if ctk.get_appearance_mode() == "Dark" else "#2d7d2d"
-                bg = "#333333" if ctk.get_appearance_mode() == "Dark" else "#e8e8e8"
-                tw.tag_config("code", font=("Courier", 11), foreground=fg, background=bg)
-            elif tag_name == "pre":
-                fg = "#e0e0e0" if ctk.get_appearance_mode() == "Dark" else "#333333"
-                bg = "#2d2d2d" if ctk.get_appearance_mode() == "Dark" else "#f0f0f0"
-                tw.tag_config("pre", font=("Courier", 11), foreground=fg, background=bg)
+            elif tag_name in ("code", "pre"):
+                tw.tag_config(tag_name, font=("Courier", 11))
             elif tag_name == "link":
                 tw.tag_config("link", foreground="#00aaff", underline=True)
             elif tag_name == "sep":
                 tw.tag_config("sep", foreground="#888888", font=("TkDefaultFont", 9))
+    _restyle_inline_tags(tw)
 
     pos = 0
     while pos < len(text):
@@ -333,6 +363,12 @@ class App(ctk.CTk):
         super().__init__()
         ctk.set_widget_scaling(1.1)
 
+        # Apply the saved appearance mode before any widget is created, so the
+        # first paint already uses it (with no saved choice we follow the system).
+        saved_appearance = load_appearance()
+        if saved_appearance:
+            ctk.set_appearance_mode(saved_appearance)
+
         self.title("Chat Translate & Sum for Telegram")
         self.geometry("1200x850")
         self.minsize(1200, 850)
@@ -413,6 +449,10 @@ class App(ctk.CTk):
         self.status_label.grid(row=0, column=1, sticky="w")
         ctk.CTkButton(header, text=_("header.settings"), image=get("settings"), width=100,
                        command=self.open_settings).grid(row=0, column=2, padx=(10, 0))
+        self.theme_btn = ctk.CTkButton(
+            header, text="", image=self._theme_icon(), width=40, compound="left",
+            command=self.toggle_appearance)
+        self.theme_btn.grid(row=0, column=3, padx=(10, 0))
 
     def _build_footer(self) -> None:
         footer = ctk.CTkFrame(self.main_frame, fg_color="transparent", height=30)
@@ -469,7 +509,7 @@ class App(ctk.CTk):
             item.destroy()
         self._chat_items = []
         src = getattr(self, "_all_chats", self.chats)
-        is_dark = ctk.get_appearance_mode() == "Dark"
+        col = _theme_colors()
         for c in src:
             item = ctk.CTkFrame(self.chat_scroll, fg_color="transparent", height=30)
             item.pack(fill="x", padx=4, pady=2)
@@ -484,14 +524,16 @@ class App(ctk.CTk):
             # Column 2: username
             uname_text = f"@{c.username}" if c.username else ""
             uname = ctk.CTkLabel(item, text=uname_text, font=("", 12),
-                                 text_color=("gray40" if not is_dark else "gray60"), width=140)
+                                 text_color=col["username_fg"], width=140)
+            uname._theme_role = "username"
             uname.grid(row=0, column=2, padx=2, pady=2, sticky="w")
             # Column 3: unread badge
             badge_text = str(c.unread_count) if c.unread_count else ""
             if badge_text:
                 badge = ctk.CTkLabel(item, text=badge_text, font=("", 13, "bold"), width=36,
-                                     fg_color=("#5EB5F7" if not is_dark else "#3B8ED0"),
+                                     fg_color=col["highlight_bg"],
                                      text_color="white", corner_radius=10)
+                badge._theme_role = "badge"
             else:
                 badge = ctk.CTkLabel(item, text="", width=36)
             badge.grid(row=0, column=3, padx=(4, 6), pady=2, sticky="e")
@@ -887,8 +929,7 @@ class App(ctk.CTk):
 
     def _select_chat(self, chat_id: int) -> None:
         """Highlight a chat item and deselect others."""
-        is_dark = ctk.get_appearance_mode() == "Dark"
-        sel_bg = "#5EB5F7" if not is_dark else "#3B8ED0"
+        sel_bg = _theme_colors()["highlight_bg"]
         norm_bg = "transparent"
         for item in self._chat_items:
             if getattr(item, 'cid', None) == chat_id:
@@ -919,11 +960,10 @@ class App(ctk.CTk):
 
     def _make_bubble(self, parent, row):
         """Create an empty bubble frame in the given scrollable frame at row."""
-        is_dark = ctk.get_appearance_mode() == "Dark"
-        bg = "#2a2a2a" if is_dark else "#e8e8e8"
-        bd = "#3a3a3a" if is_dark else "#d0d0d0"
+        c = _theme_colors()
+        bg = c["bubble_bg"]
         bubble = ctk.CTkFrame(parent, fg_color=bg, corner_radius=BUBBLE_RADIUS,
-                              border_width=1, border_color=bd)
+                              border_width=1, border_color=c["bubble_border"])
         bubble.grid(row=row, column=0, sticky="ew", padx=BUBBLE_PAD, pady=(0, BUBBLE_PAD))
         bubble.grid_columnconfigure(0, weight=1)
         return bubble, bg
@@ -931,7 +971,8 @@ class App(ctk.CTk):
     def _fill_left_bubble(self, bubble, bg, minfo: MessageInfo, photos=None):
         """Fill a left-column bubble with header, photo, and original text."""
         row_idx = 0
-        hdr_fg = "#aaaaaa" if ctk.get_appearance_mode() == "Dark" else "#666666"
+        c = _theme_colors()
+        hdr_fg = c["header_fg"]
         ctk.CTkLabel(
             bubble, text=f"{minfo.sender} · {minfo.date}",
             font=("", 10), text_color=hdr_fg,
@@ -960,7 +1001,7 @@ class App(ctk.CTk):
         elif minfo.media_type:
             ctk.CTkLabel(
                 bubble, text=f"[{minfo.media_type}]",
-                font=("", 11), text_color="#888888",
+                font=("", 11), text_color=c["muted_fg"],
             ).grid(row=row_idx, column=0, sticky="w", padx=10, pady=(4, 0))
             row_idx += 1
             # Video play button
@@ -976,7 +1017,7 @@ class App(ctk.CTk):
         # Original text
         text_to_show = minfo.text or getattr(minfo, '_caption', '')
         if text_to_show:
-            txt = Text(bubble, wrap="word", font=("TkDefaultFont", 12),
+            txt = Text(bubble, wrap="word", font=("TkDefaultFont", 12), fg=c["bubble_text"],
                        relief="flat", borderwidth=0, highlightthickness=0, takefocus=0, width=1, height=1, bg=bg, padx=5, pady=2)
             txt.grid(row=row_idx, column=0, sticky="ew", padx=10, pady=(2, 2))
             _apply_formatting(txt, text_to_show)
@@ -1047,6 +1088,7 @@ class App(ctk.CTk):
     def _fill_right_bubble(self, bubble, bg, translation: str, photo_bytes=None, msg_id=0):
         """Fill a right-column bubble with translation text (or placeholder) + photo."""
         row_idx = 0
+        c = _theme_colors()
 
         # Photo (same as left if present)
         if photo_bytes:
@@ -1059,7 +1101,7 @@ class App(ctk.CTk):
                 row_idx += 1
 
         if translation and translation.strip() not in ("ήδη Ελληνικά", ""):
-            txt = Text(bubble, wrap="word", font=("TkDefaultFont", 12),
+            txt = Text(bubble, wrap="word", font=("TkDefaultFont", 12), fg=c["bubble_text"],
                        relief="flat", borderwidth=0, highlightthickness=0, takefocus=0, width=1, height=1, bg=bg, padx=5, pady=2)
             txt.grid(row=row_idx, column=0, sticky="ew", padx=10, pady=(6, 6))
             _apply_formatting(txt, translation)
@@ -1071,7 +1113,7 @@ class App(ctk.CTk):
             # Only show placeholder if it's truly pending (no photo, no translation)
             ctk.CTkLabel(
                 bubble, text=_("translate.pending"),
-                font=("", 12, "italic"), text_color="#888888",
+                font=("", 12, "italic"), text_color=c["muted_fg"],
             ).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 10))
         # ── Reaction bar (right bubble) ──
         self._add_reaction_bar(bubble, row_idx + 1, msg_id)
@@ -1095,9 +1137,7 @@ class App(ctk.CTk):
         _, right_bubble, minfo, photo_bytes = self._msg_frames[idx]
         for child in right_bubble.winfo_children():
             child.destroy()
-        is_dark = ctk.get_appearance_mode() == "Dark"
-        bg = "#2a2a2a" if is_dark else "#e8e8e8"
-        self._fill_right_bubble(right_bubble, bg, translation, photo_bytes, msg_id=minfo.id)
+        self._fill_right_bubble(right_bubble, _theme_colors()["bubble_bg"], translation, photo_bytes, msg_id=minfo.id)
     def load_chats(self) -> None:
         self.status_label.configure(text=_("app.loading"))
         self.footer_label.configure(text=_("app.loading"))
@@ -1219,8 +1259,7 @@ class App(ctk.CTk):
                 new_minfo = new_msgs[i]
                 for child in right_bubble.winfo_children():
                     child.destroy()
-                is_dark = ctk.get_appearance_mode() == "Dark"
-                bg = "#2a2a2a" if is_dark else "#e8e8e8"
+                bg = _theme_colors()["bubble_bg"]
                 self._fill_right_bubble(right_bubble, bg, new_minfo.translation, pb, msg_id=new_minfo.id)
                 self._msg_frames[i] = (left_bubble, right_bubble, new_minfo, pb)
 
@@ -1429,6 +1468,61 @@ class App(ctk.CTk):
         self._current_chat = saved_chat
         # Reload chat list
         self.load_chats()
+
+    # ── Appearance (light / dark) ──────────────────────────────────────
+
+    def _theme_icon(self):
+        """Icon for the toggle: it shows the mode a click will switch to."""
+        return get("sun" if ctk.get_appearance_mode() == "Dark" else "moon", 18)
+
+    def toggle_appearance(self) -> None:
+        """Flip between light and dark mode, remember the choice, repaint."""
+        mode = "light" if ctk.get_appearance_mode() == "Dark" else "dark"
+        ctk.set_appearance_mode(mode)
+        save_appearance(mode)
+        self._refresh_theme()
+
+    def _refresh_theme(self) -> None:
+        """Re-apply the hand-picked colors CustomTkinter cannot restyle itself.
+
+        Runs on the widgets that are already on screen so a theme switch does
+        not throw away the loaded chats and translations.
+        """
+        c = _theme_colors()
+
+        if getattr(self, "theme_btn", None) is not None:
+            self.theme_btn.configure(image=self._theme_icon())
+
+        # Chat list: username + unread badge colors, then the selection highlight.
+        for item in self._chat_items:
+            for child in item.winfo_children():
+                role = getattr(child, "_theme_role", None)
+                if role == "username":
+                    child.configure(text_color=c["username_fg"])
+                elif role == "badge":
+                    child.configure(fg_color=c["highlight_bg"])
+        if self._selected_chat_id is not None:
+            self._select_chat(self._selected_chat_id)
+
+        # Translation bubbles: repaint the frames and rebuild their inner widgets
+        # (the inner tk.Text takes its background from the bubble color).
+        # Photo refs only belong to these bubbles, so drop them and let the
+        # rebuild repopulate the list instead of growing it on every toggle.
+        self._photo_refs.clear()
+        for left, right, minfo, pb in self._msg_frames:
+            for bubble in (left, right):
+                bubble.configure(fg_color=c["bubble_bg"], border_color=c["bubble_border"])
+            for child in left.winfo_children():
+                child.destroy()
+            self._fill_left_bubble(left, c["bubble_bg"], minfo, pb)
+            for child in right.winfo_children():
+                child.destroy()
+            self._fill_right_bubble(right, c["bubble_bg"], minfo.translation, pb, msg_id=minfo.id)
+
+        # Inline code/pre tags of the summary text area.
+        summary_tw = getattr(getattr(self, "summary_text", None), "_textbox", None)
+        if summary_tw is not None:
+            _restyle_inline_tags(summary_tw)
 
     def open_settings(self) -> None:
             dialog = SettingsDialog(self)
